@@ -7,7 +7,7 @@ import numpy as np
 wp.config.max_unroll = 1
 wp.config.enable_backward = False
 
-psd_project = False
+psd_project = -1
 
 @wp.func
 def x_to_grad_psd_hess_pt(x0: vec3, x1: vec3, x2: vec3, x3: vec3): 
@@ -19,17 +19,24 @@ def x_to_grad_psd_hess_pt(x0: vec3, x1: vec3, x2: vec3, x3: vec3):
     l = signed_distance(e0p, e1p, e2p)
 
     # clamp to positive
-    if wp.static(psd_project):
-        lam0 = wp.max(lam0, scalar(0.0))
-        lam1 = wp.max(lam1, scalar(0.0))
-        lam2 = wp.max(lam2, scalar(0.0))
-        lam3 = wp.max(lam3, scalar(0.0))
-
-    lams[0] = lam0
-    lams[1] = lam1
-    lams[2] = lam2
-    lams[3] = lam3
-    lams[4] = scalar(2.0)
+    if wp.static(psd_project == 1):
+        lams[0] = wp.max(lam0, scalar(0.0))
+        lams[1] = wp.max(lam1, scalar(0.0))
+        lams[2] = wp.max(lam2, scalar(0.0))
+        lams[3] = wp.max(lam3, scalar(0.0))
+        lams[4] = scalar(2.0)
+    elif wp.static(psd_project == -1):
+        lams[0] = wp.min(lam0, scalar(0.0))
+        lams[1] = wp.min(lam1, scalar(0.0))
+        lams[2] = wp.min(lam2, scalar(0.0))
+        lams[3] = wp.min(lam3, scalar(0.0))
+        lams[4] = scalar(0.0)
+    else:
+        lams[0] = lam0
+        lams[1] = lam1
+        lams[2] = lam2
+        lams[3] = lam3
+        lams[4] = scalar(2.0)
 
     gl0, gl1, gl2 = gl(l, e2p)
     qs[4, 0] = gl0
