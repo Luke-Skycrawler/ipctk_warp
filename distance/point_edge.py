@@ -6,6 +6,7 @@ from scalar_types import *
 wp.config.max_unroll = 1
 wp.config.enable_backward = False
 
+psd_project = -1
 @wp.func 
 def point_edge_distance(p: vec3,  edge0: vec3, edge1: vec3): 
 
@@ -68,7 +69,12 @@ def point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3):
     # hess_s = kron(k2k2T, Hu33)
     for ii in range(3):
         for jj in range(3):
-            block = -wp.outer(dadx[ii], dadx[jj]) * e0THue0 + k2k2T[ii, jj] * Hu33 
+            if wp.static(psd_project == -1):
+                block = -wp.outer(dadx[ii], dadx[jj]) * e0THue0
+            elif wp.static(psd_project == 1):
+                block = (k2k2T[ii, jj] * Hu33)
+            else:
+                block = -wp.outer(dadx[ii], dadx[jj]) * e0THue0 + k2k2T[ii, jj] * Hu33 
 
             for kk in range(3):
                 for ll in range(3):
