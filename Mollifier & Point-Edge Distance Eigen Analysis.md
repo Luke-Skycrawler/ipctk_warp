@@ -98,7 +98,7 @@ e_0 \otimes \frac{\partial\alpha}{\partial x}^T
 $$
 
 $$
-\frac{\partial ^ 2 u}{\partial x^2} = (\frac{\partial c}{\partial x})_s^T(\frac{\partial ^ 2 u}{\partial c^2})(\frac{\partial c}{\partial x})_s - (\frac{\partial c}{\partial x})_{\Delta}^T(\frac{\partial ^ 2 u}{\partial c^2})(\frac{\partial c}{\partial x})_{\Delta}
+\frac{\partial ^ 2 u^2}{\partial x^2} = (\frac{\partial c}{\partial x})_s^T(\frac{\partial ^ 2 u^2}{\partial c^2})(\frac{\partial c}{\partial x})_s - (\frac{\partial c}{\partial x})_{\Delta}^T(\frac{\partial ^ 2 u^2}{\partial c^2})(\frac{\partial c}{\partial x})_{\Delta}
 $$
 
 #### Reference
