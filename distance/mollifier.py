@@ -1,295 +1,138 @@
-import numpy as np 
-import ipctk
-import warp as wp 
-from scalar_types import *
+"""Warp edge-edge mollifier used by IPC for nearly parallel edges."""
 
-wp.config.max_unroll = 1
-wp.config.enable_backward = False
+import warp as wp
 
-def mollifier(a, b):
-    c = np.cross(a, b)
-    p = np.dot(c, c)
-    return p
-
-def mollifier_gradient(a, b): 
-    dpda = -2.0 * np.cross(b, np.cross(b, a))
-    dpdb = -2.0 * np.cross(a, np.cross(a, b))
-    return np.concatenate([dpda, dpdb])
-
-def mollifier_hessian(a, b):
-    d2pda2 = -2.0 * (np.outer(b, b) - np.dot(b, b) * np.eye(3))
-    d2pdb2 = -2.0 * (np.outer(a, a) - np.dot(a, a) * np.eye(3))
-    d2pdadb = -2.0 * (np.outer(b, a) - 2 * np.outer(a, b) + np.eye(3) * np.dot(a, b))
+from scalar_types import vec4, mat12, scalar, vec3, vec12
 
 
-    d2p = np.block([[d2pda2, d2pdadb],
-                    [d2pdadb.T, d2pdb2]])
-    return d2p
-
-def test(a, b):
-    
-    p = mollifier(a, b)
-
-    dpda = -2.0 * np.cross(b, np.cross(b, a))
-    dpdb = -2.0 * np.cross(a, np.cross(a, b))
-
-    h = 1e-3
-
-    da = np.random.rand(3) * h
-    db = np.random.rand(3) * h
-
-    dp_fd = (mollifier(a + da, b + db) - mollifier(a - da, b - db)) / 2
-
-    dp_pred = np.dot(dpda, da) + np.dot(dpdb, db)
-
-    diff = np.abs(dp_fd - dp_pred)
-
-    print(f"dp_fd = {dp_fd}, dp_pred = {dp_pred}")
-    print(f"diff = {diff}")
-
-    d2pda2 = -2.0 * (np.outer(b, b) - np.dot(b, b) * np.eye(3))
-    d2pdb2 = -2.0 * (np.outer(a, a) - np.dot(a, a) * np.eye(3))
-    d2pdadb = -2.0 * (np.outer(b, a) - 2 * np.outer(a, b) + np.eye(3) * np.dot(a, b))
+_ZERO = wp.constant(scalar(0.0))
+_ONE = wp.constant(scalar(1.0))
+_TWO = wp.constant(scalar(2.0))
+_MOLLIFIER_COEFF = wp.constant(scalar(1.0e-3))
 
 
-    dp_disturb = mollifier(a + da, b + db) + mollifier(a - da, b - db) - 2 * p
-
-    dx = np.concatenate([da, db])
-    d2p = np.block([[d2pda2, d2pdadb],
-                    [d2pdadb.T, d2pdb2]])
-
-    dpdx = np.concatenate([dpda, dpdb])
-
-    
-    # dp_pred = p + np.dot(dpdx, dx) + 0.5 * np.dot(dx, np.dot(d2p, dx))
-    dp_pred = np.dot(np.dot(d2p, dx), dx)
-
-    print(f"dp_disturb = {dp_disturb}, dp_pred = {dp_pred}")
-
-    z3 = np.zeros((3,))
-    ref = ipctk.edge_edge_cross_squarednorm_hessian(z3, a, z3, b)
-    
-    ref = np.block([[
-        ref[3: 6, 3:6], ref[3:6, 9:12]],
-        [ref[9:12, 3:6], ref[9:12, 9:12]
-    ]])
-    print(f"ref = {ref}\nd2p = {d2p}\ndiff = {np.linalg.norm(ref - d2p)}")
-    return d2p
-
-def eigs_decompose():
-    a = np.array([3, 0, 0], dtype = float)
-    b = np.array([0, 2, 0], dtype = float)
-    d2p = mollifier_hessian(a, b)
-    eigvals, eigvecs = np.linalg.eig(d2p)
-
-    '''
-    lam 0 = a^2
-    lam 1 = b^2
-    lam 2, 3 = +- ab
-    lam 4, 5 = 0.5 * ((a^2 + b^2) +- sqrt((a^2 + b^2)^2 + 12 * a^2 * b^2))
-    '''
-    
-    print(eigvals, eigvecs)
-
-def eigs_analytical(e0, e1): 
-    a = e0 
-    alpha = np.dot(e0, e1) / np.dot(e0, e0)
-    b = e1 - alpha * e0
-    
-    n = np.cross(a, b)
-    n /= np.sqrt(np.dot(n, n))
-    
-    aa = np.sqrt(np.dot(a, a))
-    bb = np.sqrt(np.dot(b, b))
-    
-    lambdas = np.zeros((6,))
-    lambdas[0] = bb * bb
-    lambdas[1] = aa * aa
-    
-    lambdas[2] = aa * bb
-    lambdas[3] = -aa * bb
-
-    term = aa* aa + bb * bb
-    delta = term * term + 12 * aa * aa * bb * bb
-    lambdas[4] = 0.5 * (term + np.sqrt(delta))
-    lambdas[5] = 0.5 * (term - np.sqrt(delta))
+@wp.func
+def _ee_cross_norm2(x0: vec3, x1: vec3, x2: vec3, x3: vec3) -> scalar:
+    a = x1 - x0
+    b = x3 - x2
+    cross = wp.cross(a, b)
+    return wp.dot(cross, cross)
 
 
-    qs = np.zeros((6, 6))
-    z3 = np.zeros((3,))
+@wp.func
+def _ee_cross_norm2_derivatives(x0: vec3, x1: vec3, x2: vec3, x3: vec3):
+    """Return x, gradient and Hessian w.r.t. [x0, x1, x2, x3]."""
+    a = x1 - x0
+    b = x3 - x2
+    aa = wp.dot(a, a)
+    ab = wp.dot(a, b)
+    bb = wp.dot(b, b)
+    cross = wp.cross(a, b)
+    value = wp.dot(cross, cross)
 
-    qs[:, 0] = np.concatenate([n, z3])
-    qs[:, 1] = np.concatenate([z3, n])
-    qs[:, 2] = np.concatenate([-b / bb, a / aa])
-    qs[:, 3] = np.concatenate([b / bb, a / aa])
+    grad_a = _TWO * (bb * a - ab * b)
+    grad_b = _TWO * (aa * b - ab * a)
+    grad = vec12()
+    for k in range(3):
+        grad[k] = -grad_a[k]
+        grad[3 + k] = grad_a[k]
+        grad[6 + k] = -grad_b[k]
+        grad[9 + k] = grad_b[k]
 
-    for i in range(4, 6):
-        qs[:, i] = np.concatenate([2 * bb * a, (lambdas[i] / bb - bb) * b])
-    
-    for i in range(6): 
-        qs[:, i] /= np.linalg.norm(qs[:, i])
-    lambdas *= 2.0
-
-    d2p = mollifier_hessian(a, b)
-    eigvals, eigvecs = np.linalg.eig(d2p)
-
-    diff_eigsys = qs @ np.diag(lambdas) @ qs.T - d2p
-    diff_eigsys_norm = np.linalg.norm(diff_eigsys)
-
-    eigvals_sort = np.sort(eigvals)
-    lambdas_sort = np.sort(lambdas)
-
-    diff_vals = np.linalg.norm(eigvals_sort - lambdas_sort)
-
-    debug = False
-    if debug: 
-
-        # sort q columns according to the order of lambdas
-        idx = np.argsort(lambdas)
-        qs = qs[:, idx]
-        
-        # sort eigvecs according to the order of eigvals
-        idx_eig = np.argsort(eigvals)
-        eigvecs = eigvecs[:, idx_eig]
-
-        eigvals = eigvals_sort
-        lambdas = lambdas_sort
-
+    # Hessian blocks for a and b, mapped to the four endpoints by signs.
+    hess = mat12()
+    signs_a = vec4(scalar(-1.0), _ONE, _ZERO, _ZERO)
+    signs_b = vec4(_ZERO, _ZERO, scalar(-1.0), _ONE)
+    for vi in range(4):
+        for vj in range(4):
+            for i in range(3):
+                for j in range(3):
+                    identity = _ZERO
+                    if i == j:
+                        identity = _ONE
+                    Haa = _TWO * (bb * identity - b[i] * b[j])
+                    Hbb = _TWO * (aa * identity - a[i] * a[j])
+                    Hab = _TWO * (
+                        _TWO * a[i] * b[j] - b[i] * a[j] - ab * identity
+                    )
+                    Hba = _TWO * (
+                        _TWO * b[i] * a[j] - a[i] * b[j] - ab * identity
+                    )
+                    hess[3 * vi + i, 3 * vj + j] = (
+                        signs_a[vi] * signs_a[vj] * Haa
+                        + signs_a[vi] * signs_b[vj] * Hab
+                        + signs_b[vi] * signs_a[vj] * Hba
+                        + signs_b[vi] * signs_b[vj] * Hbb
+                    )
+    return value, grad, hess
 
 
-        print(f"analytical lambdas = \n{lambdas}, \neigvals = \n\n{qs}\n\n\n\n")
-        print(f"numerical eigen values = \n{eigvals}, \neigvecs = \n\n{eigvecs}")
+@wp.func
+def ee_mollifier_threshold(
+    x0_rest: vec3, x1_rest: vec3, x2_rest: vec3, x3_rest: vec3
+) -> scalar:
+    """Compute ``1e-3 ||a_rest||^2 ||b_rest||^2``."""
+    a = x1_rest - x0_rest
+    b = x3_rest - x2_rest
+    return _MOLLIFIER_COEFF * wp.dot(a, a) * wp.dot(b, b)
 
-    
-    print(f"analytical lambdas = \n{np.sort(lambdas)}\neigvals = \n{np.sort(eigvals)}, \ndiff eig vals = {diff_vals}, \ndiff_eigsys = {diff_eigsys_norm}")
 
-@wp.func 
-def mollifier_gradient_hessian(e0: vec3, e1: vec3): 
-    z = scalar(0.)
-    o = scalar(1.)
-    a = e0 
-    alpha = wp.dot(e0, e1) / wp.dot(e0, e0)
-    b = e1 - alpha * e0
-    
-    n = wp.normalize(wp.cross(a, b))
-    
-    aa = wp.length(a) 
-    bb = wp.length(b)
-    
-    lambdas = vec6(z)
+@wp.func
+def ee_mollifier_value(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+) -> scalar:
+    x = _ee_cross_norm2(x0, x1, x2, x3)
+    if eps_x > _ZERO and x < eps_x:
+        r = x / eps_x
+        return (_TWO - r) * r
+    return _ONE
 
-    lambdas[0] = bb * bb
-    lambdas[1] = aa * aa
-    
-    lambdas[2] = aa * bb
-    lambdas[3] = -aa * bb
 
-    term = aa * aa + bb * bb
-    delta = term * term + scalar(12.) * aa * aa * bb * bb
-    lambdas[4] = scalar(0.5) * (term + wp.sqrt(delta))
-    lambdas[5] = scalar(0.5) * (term - wp.sqrt(delta))
+@wp.func
+def ee_mollifier_derivatives(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+):
+    """Return mollifier value, gradient and exact Hessian."""
+    value = _ONE
+    grad = vec12()
+    hess = mat12()
+    x = _ee_cross_norm2(x0, x1, x2, x3)
+    if eps_x > _ZERO and x < eps_x:
+        x, grad_x, hess_x = _ee_cross_norm2_derivatives(x0, x1, x2, x3)
+        inv_eps = _ONE / eps_x
+        r = x * inv_eps
+        value = (_TWO - r) * r
+        derivative = _TWO * inv_eps * (_ONE - r)
+        derivative2 = -_TWO * inv_eps * inv_eps
+        for i in range(12):
+            grad[i] = derivative * grad_x[i]
+            for j in range(12):
+                hess[i, j] = (
+                    derivative2 * grad_x[i] * grad_x[j]
+                    + derivative * hess_x[i, j]
+                )
+    return value, grad, hess
 
-    qs = mat6(z)
-    z3 = vec3(z)
-    
-    qs[0] = make_vec6(n, z3)
-    qs[1] = make_vec6(z3, n)
-    qs[2] = make_vec6(-b / bb, a / aa)
-    qs[3] = make_vec6(b / bb, a / aa)
 
-    for i in range(4, 6): 
-        qs[i] = make_vec6(scalar(2.0) * bb * a, (lambdas[i] / bb - bb) * b)
-    
-    for i in range(6):
-        qs[i] /= wp.length(qs[i])
-    
-    lambdas *= scalar(2.0)
-    
-    qs = wp.transpose(qs)
-    
-    grada = scalar(-2.0) * wp.cross(b, wp.cross(b, a))
-    gradb = scalar(-2.0) * wp.cross(a, wp.cross(a, b))
+# Aliases matching warp-ipc's public kernel names.
+@wp.func
+def ee_mollifier(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+) -> scalar:
+    return ee_mollifier_value(x0, x1, x2, x3, eps_x)
 
-    grad = make_vec6(grada - alpha * gradb, gradb)
-    # grad = scalar(-2.0) * make_vec6(wp.cross(b, wp.cross(b, a)), wp.cross(a, wp.cross(a, b)))
 
-    # dcdx = mat22(o, z, -alpha, o) outer I3
-    dcdx = mat6(
-        o, z, z, z, z, z,
-        z, o, z, z, z, z,
-        z, z, o, z, z, z,
-        -alpha, z, z, o, z, z,
-        z, -alpha, z, z, o, z,
-        z, z, -alpha, z, z, o
-    )
-    
-    qs = wp.transpose(dcdx) @ qs
-    return grad, qs @ wp.diag(lambdas) @ wp.transpose(qs)
-    
-@wp.kernel 
-def mollifier_gradient_hessian_kernel(e: wp.array(dtype = vec3), grad: wp.array(dtype = vec6), hess: wp.array(dtype = mat6)):
-    i = wp.tid()
-    e0 = e[i * 2 + 0]
-    e1 = e[i * 2 + 1]
-    
-    grad_i, hess_i = mollifier_gradient_hessian(e0, e1)
-    grad[i] = grad_i
-    hess[i] = hess_i
+@wp.func
+def ee_mollifier_gradient(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+) -> vec12:
+    value, grad, hess = ee_mollifier_derivatives(x0, x1, x2, x3, eps_x)
+    return grad
 
-def test_full():
-    a = np.array([3, 0, 0], dtype = float)
-    b = np.array([1, 2, 0], dtype = float)
 
-    d2p = mollifier_hessian(a, b)
-
-    I3 = np.eye(3)
-    z3 = np.zeros((3, 3))
-    alpha = np.dot(a, b) / np.dot(a, a)
-    dcdx = np.block([[I3, -alpha * I3],
-                    [z3, I3]]).T
-    
-    d2p_perp = mollifier_hessian(a, b - alpha * a)
-    d2p_proj = dcdx.T @ d2p_perp @ dcdx
-    
-    print(f"d2p = {np.linalg.norm(d2p)}\nd2p_proj = {np.linalg.norm(d2p_proj)}\ndiff = {np.linalg.norm(d2p - d2p_proj)}")
-
-    # A1 = dcdx_delta^T H dcdx_delta is indeed zero 
-
-def test_warp():
-    n_tests = 100
-    e = np.random.rand(n_tests * 2, 3)
-
-    es = wp.array(e, dtype = vec3)
-    grad = wp.zeros((n_tests,), dtype = vec6)
-    hess = wp.zeros((n_tests,), dtype = mat6)
-
-    wp.launch(mollifier_gradient_hessian_kernel, dim = n_tests, inputs = [es, grad, hess])
-    
-    gradnp = grad.numpy()
-    hessnp = hess.numpy()
-
-    for i in range(n_tests):
-        hess_i = mollifier_hessian(e[i * 2], e[i * 2 + 1])
-        grad_i = mollifier_gradient(e[i * 2], e[i * 2 + 1])
-        
-        diff = np.linalg.norm(hess_i - hessnp[i])
-        diff_grad = np.linalg.norm(grad_i - gradnp[i])
-        print(f"test {i}, diff = {diff}, diff_grad = {diff_grad}")
-    
-
-if __name__ == "__main__":
-    a = np.random.rand(3)
-    b = np.random.rand(3)
-
-    # a = np.array([2, 0, 0], dtype = float)
-    # b = np.array([0, 1, 0], dtype = float)
-    # test(a, b)
-
-    # eigs_decompose()
-    # test_full()
-    # eigs_analytical(a, b)
-    # x = test(a, b)
-    # y = test(a, b + a)
-    # print(f"x y diff = {np.linalg.norm(x - y)}")
-    test_warp()
-
+@wp.func
+def ee_mollifier_hessian(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+) -> mat12:
+    value, grad, hess = ee_mollifier_derivatives(x0, x1, x2, x3, eps_x)
+    return hess

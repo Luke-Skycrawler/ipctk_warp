@@ -7,7 +7,7 @@ import numpy as np
 wp.config.max_unroll = 1
 wp.config.enable_backward = False
 
-psd_project = -1
+psd_project = 0
 
 @wp.func
 def x_to_grad_psd_hess_ee(x0: vec3, x1: vec3, x2: vec3, x3: vec3): 

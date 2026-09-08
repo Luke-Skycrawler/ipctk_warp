@@ -5,7 +5,7 @@ from scalar_types import *
 wp.config.max_unroll = 1
 wp.config.enable_backward = False
 
-psd_project = -1
+psd_project = 0
 @wp.func 
 def point_edge_distance(p: vec3,  edge0: vec3, edge1: vec3): 
 
