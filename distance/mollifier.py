@@ -2,7 +2,7 @@
 
 import warp as wp
 
-from scalar_types import vec4, mat12, scalar, vec3, vec12
+from scalar_types import vec4, mat12, scalar, vec3, vec12, vec6, mat6, make_vec6
 
 
 _ZERO = wp.constant(scalar(0.0))
@@ -112,6 +112,138 @@ def ee_mollifier_derivatives(
                     + derivative * hess_x[i, j]
                 )
     return value, grad, hess
+
+
+@wp.func
+def _cross_norm2_gradient_hessian_psd(edge_a: vec3, edge_b: vec3):
+    """Gradient and analytical PSD Hessian of ||edge_a x edge_b||^2."""
+    zero = scalar(0.0)
+    one = scalar(1.0)
+    aa_sq = wp.dot(edge_a, edge_a)
+    bb_full_sq = wp.dot(edge_b, edge_b)
+    eps = scalar(1.0e-30)
+
+    if aa_sq <= eps:
+        hess = mat6(zero)
+        projector = _TWO * (bb_full_sq * wp.diag(vec3(one)) - wp.outer(edge_b, edge_b))
+        for i in range(3):
+            for j in range(3):
+                hess[i, j] = projector[i, j]
+        return vec6(zero), hess
+
+    alpha = wp.dot(edge_a, edge_b) / aa_sq
+    b = edge_b - alpha * edge_a
+    bb_sq = wp.dot(b, b)
+
+    if bb_sq <= eps:
+        hess = mat6(zero)
+        projector = _TWO * (aa_sq * wp.diag(vec3(one)) - wp.outer(edge_a, edge_a))
+        for i in range(3):
+            for j in range(3):
+                hess[i, j] = alpha * alpha * projector[i, j]
+                hess[i, j + 3] = -alpha * projector[i, j]
+                hess[i + 3, j] = -alpha * projector[i, j]
+                hess[i + 3, j + 3] = projector[i, j]
+        return vec6(zero), hess
+
+    n = wp.normalize(wp.cross(edge_a, b))
+    aa = wp.sqrt(aa_sq)
+    bb = wp.sqrt(bb_sq)
+    eigenvalues = vec6(zero)
+    eigenvalues[0] = bb_sq
+    eigenvalues[1] = aa_sq
+    eigenvalues[2] = aa * bb
+    eigenvalues[3] = -aa * bb
+    term = aa_sq + bb_sq
+    discriminant = term * term + scalar(12.0) * aa_sq * bb_sq
+    eigenvalues[4] = scalar(0.5) * (term + wp.sqrt(discriminant))
+    eigenvalues[5] = scalar(0.5) * (term - wp.sqrt(discriminant))
+
+    eigenvectors = mat6(zero)
+    zero3 = vec3(zero)
+    eigenvectors[0] = make_vec6(n, zero3)
+    eigenvectors[1] = make_vec6(zero3, n)
+    eigenvectors[2] = make_vec6(-b / bb, edge_a / aa)
+    eigenvectors[3] = make_vec6(b / bb, edge_a / aa)
+    for i in range(4, 6):
+        eigenvectors[i] = make_vec6(
+            _TWO * bb * edge_a,
+            (eigenvalues[i] / bb - bb) * b,
+        )
+    for i in range(6):
+        eigenvectors[i] /= wp.length(eigenvectors[i])
+        eigenvalues[i] = _TWO * wp.max(eigenvalues[i], zero)
+
+    grad_a = scalar(-2.0) * wp.cross(b, wp.cross(b, edge_a))
+    grad_b = scalar(-2.0) * wp.cross(edge_a, wp.cross(edge_a, b))
+    grad = make_vec6(grad_a - alpha * grad_b, grad_b)
+
+    eigenvectors = wp.transpose(eigenvectors)
+    transform = mat6(
+        one, zero, zero, zero, zero, zero,
+        zero, one, zero, zero, zero, zero,
+        zero, zero, one, zero, zero, zero,
+        -alpha, zero, zero, one, zero, zero,
+        zero, -alpha, zero, zero, one, zero,
+        zero, zero, -alpha, zero, zero, one,
+    )
+    eigenvectors = wp.transpose(transform) @ eigenvectors
+    return grad, eigenvectors @ wp.diag(eigenvalues) @ wp.transpose(eigenvectors)
+
+
+@wp.func
+def ee_mollifier_gradient_hessian_psd(
+    x0: vec3, x1: vec3, x2: vec3, x3: vec3, eps_x: scalar
+):
+    """Exact mollifier gradient and an analytical PSD Hessian approximation."""
+    edge_a = x1 - x0
+    edge_b = x3 - x2
+    grad_edges, hess_edges = _cross_norm2_gradient_hessian_psd(edge_a, edge_b)
+
+    grad_x = vec12()
+    hess_x = mat12()
+    for i in range(12):
+        edge_i = i
+        sign_i = _ONE
+        if i < 3:
+            sign_i = -_ONE
+        elif i < 6:
+            edge_i = i - 3
+        elif i < 9:
+            edge_i = i - 3
+            sign_i = -_ONE
+        else:
+            edge_i = i - 6
+        grad_x[i] = sign_i * grad_edges[edge_i]
+
+        for j in range(12):
+            edge_j = j
+            sign_j = _ONE
+            if j < 3:
+                sign_j = -_ONE
+            elif j < 6:
+                edge_j = j - 3
+            elif j < 9:
+                edge_j = j - 3
+                sign_j = -_ONE
+            else:
+                edge_j = j - 6
+            hess_x[i, j] = sign_i * sign_j * hess_edges[edge_i, edge_j]
+
+    grad = vec12()
+    hess = mat12()
+    cross = wp.cross(edge_a, edge_b)
+    x = wp.dot(cross, cross)
+    if eps_x > _ZERO and x < eps_x:
+        inv_eps = _ONE / eps_x
+        derivative = _TWO * inv_eps * (_ONE - x * inv_eps)
+        for i in range(12):
+            grad[i] = derivative * grad_x[i]
+            for j in range(12):
+                # The omitted scalar second-derivative term is NSD because
+                # the active mollifier polynomial is concave in x.
+                hess[i, j] = derivative * hess_x[i, j]
+    return grad, hess
 
 
 # Aliases matching warp-ipc's public kernel names.

@@ -5,7 +5,6 @@ from scalar_types import *
 wp.config.max_unroll = 1
 wp.config.enable_backward = False
 
-psd_project = 0
 @wp.func 
 def point_edge_distance(p: vec3,  edge0: vec3, edge1: vec3): 
 
@@ -20,7 +19,7 @@ def point_edge_distance(p: vec3,  edge0: vec3, edge1: vec3):
     return alpha, d 
 
 @wp.func 
-def point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3):
+def _point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3, projection: int):
     z = scalar(0.0)
     o = scalar(1.0)
     alpha, d = point_edge_distance(p, edge0, edge1)
@@ -133,11 +132,11 @@ def point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3):
 
     for ii in range(3):
         for jj in range(3):
-            if wp.static(psd_project == -1):
+            if projection == -1:
                 block = wp.outer(q_minus[ii], q_minus[jj]) * wp.min(lambda_minus, z)
                 if b_norm_sq <= eps and a_norm_sq > eps:
                     block = wp.outer(a_hat[ii], a_hat[jj]) * wp.min(lambda_minus, z)
-            elif wp.static(psd_project == 1):
+            elif projection == 1:
                 # Two directions in range(S), orthogonal to a, retain the
                 # eigenvalue s.  The remaining positive mode is q_plus.
                 block = s * (
@@ -157,6 +156,14 @@ def point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3):
                     out9x9[ii * 3 + kk, jj * 3 + ll] = block[kk, ll]
     
     return grad, out9x9
+
+@wp.func
+def point_edge_distance_gradient_hessian(p: vec3, edge0: vec3, edge1: vec3):
+    return _point_edge_distance_gradient_hessian(p, edge0, edge1, 0)
+
+@wp.func
+def point_edge_distance_gradient_nsd_hessian(p: vec3, edge0: vec3, edge1: vec3):
+    return _point_edge_distance_gradient_hessian(p, edge0, edge1, -1)
     
 @wp.func 
 def dalphadx(e0: vec3, e2: vec3):
@@ -185,14 +192,7 @@ def test_warp(grad, hess, p, edge0, edge1, verbose = True):
     grad_diff = ipc_grad - grad
 
     eigvals, eigvecs = np.linalg.eigh(ipc_ref)
-    if psd_project == 1:
-        eigvals = np.clip(eigvals, a_min=0.0, a_max=None)
-        hess_ref = eigvecs @ np.diag(eigvals) @ eigvecs.T
-    elif psd_project == -1:
-        eigvals = np.clip(eigvals, a_min=None, a_max=0.0)
-        hess_ref = eigvecs @ np.diag(eigvals) @ eigvecs.T
-    else:
-        hess_ref = ipc_ref
+    hess_ref = ipc_ref
 
     diff = hess_ref - hess
 
