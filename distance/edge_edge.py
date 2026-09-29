@@ -42,12 +42,20 @@ def _x_to_grad_hess_ee(x0: vec3, x1: vec3, x2: vec3, x3: vec3, projection: int):
     qs[4, 2] = gl2
 
     for ii in range(5):         
-        sum = scalar(0.0)
+        norm_sq = scalar(0.0)
         for jj in range(3):
-            sum += wp.length_sq(qs[ii, jj])
-        sum = wp.sqrt(sum)
-        for jj in range(3):
-            qs[ii, jj] /= sum
+            norm_sq += wp.length_sq(qs[ii, jj])
+        # Degenerate/parallel configurations can produce a zero analytical
+        # eigenvector after float32 rounding.  Zero the corresponding mode;
+        # normalizing it would inject NaNs into an otherwise finite Hessian.
+        if norm_sq > scalar(1.0e-30):
+            inv_norm = scalar(1.0) / wp.sqrt(norm_sq)
+            for jj in range(3):
+                qs[ii, jj] *= inv_norm
+        else:
+            lams[ii] = scalar(0.0)
+            for jj in range(3):
+                qs[ii, jj] = vec3(scalar(0.0))
 
     dcdxi = dceedx_s(x0, x1, x2, x3)
     u = wp.zeros((5, 4), dtype = vec3)
